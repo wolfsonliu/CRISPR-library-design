@@ -20,6 +20,7 @@ suppressPackageStartupMessages(library(Biostrings))
 suppressPackageStartupMessages(library(GenomicFeatures))
 suppressPackageStartupMessages(library(GenomicRanges))
 suppressPackageStartupMessages(library(DBI))
+suppressPackageStartupMessages(library(parallel))
 suppressPackageStartupMessages(library(dplyr))
 suppressPackageStartupMessages(library(tidyr))
 options(stringsAsFactors=FALSE)
@@ -266,117 +267,270 @@ con <- dbConnect(RSQLite::SQLite(), db.file)
 
 load('mismatch.activate.Rdata')
 
-for (start.base in start.bases) {
-    tmplabel <- paste(sample(c(letters, as.character(1:0)), 5), collapse='')
-    tmpfa <- file.path(
-        tmpdir,
-        paste(tmplabel, 'fa', sep='.')
-    )
-    while (file.exists(tmpfa)) {
+if (parallel.threads == 1) {
+    ## use non parallel strategy
+    for (start.base in start.bases) {
         tmplabel <- paste(sample(c(letters, as.character(1:0)), 5), collapse='')
         tmpfa <- file.path(
             tmpdir,
             paste(tmplabel, 'fa', sep='.')
         )
-    }
-    tmpoff <- file.path(
-        tmpdir,
-        paste(tmplabel, 'off', sep='.')
-    )
-
-    res <- dbSendQuery(
-        con, 'SELECT spacer FROM spacer WHERE substr(spacer, 1, ?) = ? AND count = 1',
-        params=list(
-            nchar(start.base),
-            start.base
-        )
-    )
-    spacer <- dbFetch(res)
-    if (dim(spacer)[1] > 0) {
-        spacer <- DNAStringSet(spacer$spacer)
-        names(spacer) <- as.character(spacer)
-        writeXStringSet(spacer, tmpfa, format='fasta')
-
-        runBowtie(
-            index.prefix,
-            tmpfa, tmpoff,
-            threads=threads
+        while (file.exists(tmpfa)) {
+            tmplabel <- paste(sample(c(letters, as.character(1:0)), 5), collapse='')
+            tmpfa <- file.path(
+                tmpdir,
+                paste(tmplabel, 'fa', sep='.')
+            )
+        }
+        tmpoff <- file.path(
+            tmpdir,
+            paste(tmplabel, 'off', sep='.')
         )
 
-        dat <- read.table(
-            tmpoff, header=FALSE, sep='\t',
-            stringsAsFactors=FALSE
+        res <- dbSendQuery(
+            con, 'SELECT spacer FROM spacer WHERE substr(spacer, 1, ?) = ? AND count = 1',
+            params=list(
+                nchar(start.base),
+                start.base
+            )
         )
-        file.remove(tmpfa)
-        file.remove(tmpoff)
-        gr <- GRanges(
-            seqnames=dat$V3,
-            ranges=IRanges(
-                start=ifelse(
-                    dat$V2 == '+',
-                    dat$V4 + spacer.length,
-                    dat$V4 - pam.length
+        spacer <- dbFetch(res)
+        if (dim(spacer)[1] > 0) {
+            spacer <- DNAStringSet(spacer$spacer)
+            names(spacer) <- as.character(spacer)
+            writeXStringSet(spacer, tmpfa, format='fasta')
+
+            runBowtie(
+                index.prefix,
+                tmpfa, tmpoff,
+                threads=bowtie.threads
+            )
+
+            dat <- read.table(
+                tmpoff, header=FALSE, sep='\t',
+                stringsAsFactors=FALSE
+            )
+            file.remove(tmpfa)
+            file.remove(tmpoff)
+            gr <- GRanges(
+                seqnames=dat$V3,
+                ranges=IRanges(
+                    start=ifelse(
+                        dat$V2 == '+',
+                        dat$V4 + spacer.length,
+                        dat$V4 - pam.length
+                    ),
+                    end=ifelse(
+                        dat$V2 == '+',
+                        dat$V4 + spacer.length + pam.length -1,
+                        dat$V4 - 1
+                    )
                 ),
-                end=ifelse(
-                    dat$V2 == '+',
-                    dat$V4 + spacer.length + pam.length -1,
-                    dat$V4 - 1
+                strand=dat$V2
+            )
+
+            mcols(gr)$pam <- getSequence(gr, chromosomes)
+            selects <- vcountPattern(
+                pam.pattern[[1]], gr$pam, fixed=FALSE
+            ) > 0
+            dat <- dat[selects,]
+            dat$mismatch <- unlist(
+                lapply(strsplit(dat$V8, ','), length)
+            )
+            ## CFD value
+            dat$cfd <- unlist(
+                lapply(
+                    strsplit(dat$V8, ','),
+                    function(a) {
+                        if (length(a) == 0) {
+                            return(1)
+                        }
+                        else {
+                            return(Reduce(`*`, mismatch.activate[a]))
+                        }
+                    }
                 )
-            ),
-            strand=dat$V2
-        )
-
-        mcols(gr)$pam <- getSequence(gr, chromosomes)
-        selects <- vcountPattern(
-            pam.pattern[[1]], gr$pam, fixed=FALSE
-        ) > 0
-        dat <- dat[selects,]
-        dat$mismatch <- unlist(
-            lapply(strsplit(dat$V8, ','), length)
-        )
-        ## CFD value
-        dat$cfd <- unlist(
-            lapply(
-                strsplit(dat$V8, ','),
-                function(a) {
-                    if (length(a) == 0) {
-                        return(1)
-                    }
-                    else {
-                        return(Reduce(`*`, mismatch.activate[a]))
-                    }
-                }
             )
-        )
-        ## CCtop mismatch_score
-        dat$mismatch_score <- unlist(
-            lapply(
-                strsplit(dat$V8, ','),
-                function(a) {
-                    if (length(a) == 0) {
-                        return(0)
+            ## CCtop mismatch_score
+            dat$mismatch_score <- unlist(
+                lapply(
+                    strsplit(dat$V8, ','),
+                    function(a) {
+                        if (length(a) == 0) {
+                            return(0)
+                        }
+                        else {
+                            return(
+                                sum(1.2 ^ as.numeric(gsub(':.*', '', a)))
+                            )
+                        }
                     }
-                    else {
-                        return(
-                            sum(1.2 ^ as.numeric(gsub(':.*', '', a)))
-                        )
-                    }
-                }
+                )
             )
-        )
 
-        x <- dat %>%
-            group_by(V1, mismatch, cfd, mismatch_score) %>%
-            summarize(count=n()) %>%
-            transform(
-                spacer=trimws(V1)
-            ) %>%
-            select(spacer, mismatch, count, cfd, mismatch_score)
-        dbAppendTable(con, 'spacer_off_target_raw', x)
+            x <- dat %>%
+                group_by(V1, mismatch, cfd, mismatch_score) %>%
+                summarize(count=n()) %>%
+                transform(
+                    spacer=trimws(V1)
+                ) %>%
+                select(spacer, mismatch, count, cfd, mismatch_score)
+            dbAppendTable(con, 'spacer_off_target_raw', x)
+        }
     }
-}
 
-dbDisconnect(con)
+    dbDisconnect(con)
+} else if (parallel.threads > 1) {
+    cl <- makeCluster(parallel.threads)
+    clusterExport(cl, "mismatch.activate")
+    clusterExport(cl, "chromosomes")
+    clusterExport(cl, "fa.file")
+    clusterExport(cl, "db.file")
+    clusterExport(cl, "index.prefix")
+    clusterExport(cl, "spacer.length")
+    clusterExport(cl, "pam.pattern")
+    clusterExport(cl, "pam.length")
+    clusterExport(cl, "tmpdir")
+    clusterExport(cl, "bowtie.threads")
+    clusterExport(cl, "runBowtie")
+    clusterExport(cl, "getSequence")
+    clusterEvalQ(cl, suppressPackageStartupMessages(library(Biostrings)))
+    clusterEvalQ(cl, suppressPackageStartupMessages(library(dplyr)))
+    clusterEvalQ(cl, suppressPackageStartupMessages(library(GenomicRanges)))
+
+    tmpfiles <- parLapplyLB(
+        cl,
+        start.bases,
+        function(start.base) {
+            tmpfa <- file.path(
+                tmpdir,
+                paste(start.base, 'fa', sep='.')
+            )
+            tmpoff <- file.path(
+                tmpdir,
+                paste(start.base, 'off', sep='.')
+            )
+            con <- DBI::dbConnect(RSQLite::SQLite(), db.file)
+            res <- DBI::dbSendQuery(
+                            con,
+                            'SELECT spacer FROM spacer WHERE substr(spacer, 1, ?) = ? AND count = 1',
+                            params=list(
+                                nchar(start.base),
+                                start.base
+                            )
+                        )
+            spacer <- DBI::dbFetch(res)
+            DBI::dbDisconnect(con)
+            if (dim(spacer)[1] > 0) {
+                spacer <- DNAStringSet(spacer$spacer)
+                names(spacer) <- as.character(spacer)
+                writeXStringSet(spacer, tmpfa, format='fasta')
+
+                runBowtie(
+                    index.prefix,
+                    tmpfa, tmpoff,
+                    threads=bowtie.threads
+                )
+
+                dat <- read.table(
+                    tmpoff, header=FALSE, sep='\t',
+                    stringsAsFactors=FALSE
+                )
+                file.remove(tmpfa)
+                file.remove(tmpoff)
+                gr <- GRanges(
+                    seqnames=dat$V3,
+                    ranges=IRanges(
+                        start=ifelse(
+                            dat$V2 == '+',
+                            dat$V4 + spacer.length,
+                            dat$V4 - pam.length
+                        ),
+                        end=ifelse(
+                            dat$V2 == '+',
+                            dat$V4 + spacer.length + pam.length -1,
+                            dat$V4 - 1
+                        )
+                    ),
+                    strand=dat$V2
+                )
+
+                mcols(gr)$pam <- getSequence(gr, chromosomes)
+                selects <- vcountPattern(
+                    pam.pattern[[1]], gr$pam, fixed=FALSE
+                ) > 0
+                dat <- dat[selects,]
+                dat$mismatch <- unlist(
+                    lapply(strsplit(dat$V8, ','), length)
+                )
+                dat$cfd <- unlist(
+                    lapply(
+                        strsplit(dat$V8, ','),
+                        function(a) {
+                            if (length(a) == 0) {
+                                return(1)
+                            }
+                            else {
+                                return(Reduce(`*`, mismatch.activate[a]))
+                            }
+                        }
+                    )
+                )
+                dat$mismatch_score <- unlist(
+                    lapply(
+                        strsplit(dat$V8, ','),
+                        function(a) {
+                            if (length(a) == 0) {
+                                return(0)
+                            }
+                            else {
+                                return(
+                                    sum(1.2 ^ as.numeric(gsub(':.*', '', a)))
+                                )
+                            }
+                        }
+                    )
+                )
+
+                x <- dat %>%
+                    group_by(V1, mismatch, cfd, mismatch_score) %>%
+                    summarize(count=n()) %>%
+                    transform(
+                        spacer=trimws(V1)
+                    ) %>%
+                    select(spacer, mismatch, count, cfd, mismatch_score)
+
+                tmpout <- file.path(
+                    tmpdir, paste(start.base, 'spacer_off_target_raw', 'txt', sep='.')
+                )
+                write.table(
+                    x,
+                    tmpout,
+                    row.names=FALSE, sep='\t', quote=FALSE
+                )
+                return(tmpout)
+            }
+        }
+    )
+
+    stopCluster(cl)
+
+    con <- dbConnect(RSQLite::SQLite(), db.file)
+    tmpfiles <- list.files(
+        tmpdir, '.spacer_off_target_raw.txt'
+    )
+    for (x in tmpfiles) {
+        xdata <- read.table(
+            file.path(tmpdir, x),
+            header=TRUE, sep='\t', stringsAsFactor=FALSE
+        )
+
+        dbAppendTable(con, 'spacer_off_target_raw', xdata)
+    }
+    dbDisconnect(con)
+} else {
+    stop('parallel.threads should be larger or equal to 1')
+}
 
 ####################
 
@@ -384,7 +538,7 @@ con <- dbConnect(RSQLite::SQLite(), db.file)
 
 dbExecute(
     con,
-    'CREATE TABEL IF NOT EXISTS spacer_mismatch (
+    'CREATE TABLE IF NOT EXISTS spacer_mismatch (
         spacer   TEXT,
         mismatch INTEGER,
         count    INTEGER,
@@ -457,7 +611,7 @@ dbCreateTable(
 
 spacer.gc <- dbFetch(dbSendQuery(
     con,
-    'SELECT DISTINCT spacer FROM spacer_mismatch'
+    'SELECT DISTINCT spacer FROM spacer_mismatch;'
 ))
 
 spacer.gc$gc <- letterFrequency(
@@ -478,28 +632,28 @@ dbDisconnect(con)
 con <- dbConnect(RSQLite::SQLite(), db.file)
 
 spacer.off.target <- dbFetch(dbSendQuery(
-    con, 'SELECT * FROM spacer_mismatch'
+    con, 'SELECT * FROM spacer_mismatch;'
 )) %>%
     spread(key=mismatch, value=count, fill=0)
 
 colnames(spacer.off.target) <- c('spacer', 'm0', 'm1', 'm2', 'm3')
 
 spacer.gc <- dbFetch(dbSendQuery(
-    con, 'SELECT * FROM spacer_gc'
+    con, 'SELECT * FROM spacer_gc;'
 ))
 
 spacer.specific_score <- dbFetch(dbSendQuery(
-    con, 'SELECT * FROM spacer_specific_score'
+    con, 'SELECT * FROM spacer_specific_score;'
 ))
 
 spacer.mismatch_score <- dbFetch(dbSendQuery(
-    con, 'SELECT * FROM spacer_mismatch_score'
+    con, 'SELECT * FROM spacer_mismatch_score;'
 ))
 
 gene.targeting.spacer <- dbFetch(dbSendQuery(
     con,
     'SELECT * FROM spacer_pam_site
-    WHERE length(gene_id) > 0'
+    WHERE length(gene_id) > 0;'
 ))
 
 selected.spacer <- inner_join(
@@ -552,7 +706,7 @@ dbExecute(
          specific_score REAL,
          mismatch_score REAL,
          UNIQUE(spacer) ON CONFLICT IGNORE
-    )'
+    );'
 )
 
 dbAppendTable(

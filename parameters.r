@@ -4,7 +4,10 @@
 ## file path and names
 
 ## threads used in bowtie searching for off-target sites
-threads <- 15
+bowtie.threads <- 15
+## parallel threads: used by R parallel, default is 1 (without parallel).
+##   maximum number of cores required equals to parallel.threads * bowtie.threads.
+parallel.threads <- 1
 ## temporary file directory
 tmpdir <- './tmp'
 ## species information
