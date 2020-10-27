@@ -136,80 +136,55 @@ for (chrname in names(chromosomes)) {
         chromosomes[[chrname]],
         fixed=FALSE
     )
-    s.fwd.gr <- GRanges(
-        seqnames=chrname,
-        ranges=IRanges(
-            start=start(s.fwd),
-            end=end(s.fwd)
-        ),
-        strand='+',
-        spacer=substr(s.fwd, 1, spacer.length),
-        pam=substr(s.fwd, spacer.length + 1, spacer.length + pam.length),
-        gene_id='',
-        exon_rank=-1
-    )
-    print('Granges')
-    hits <- findOverlaps(
-        s.fwd.gr, exons(transcript.anno),
-        select='first', ignore.strand=TRUE
-    )
-    print('find overlaps')
-    mcols(s.fwd.gr[seq(length(hits))[!is.na(hits)]])$gene_id <- unlist(exons(transcript.anno, columns='gene_id')[na.omit(hits)]$gene_id)
-    mcols(s.fwd.gr[seq(length(hits))[!is.na(hits)]])$exon_rank <- unlist(exons(transcript.anno, columns='exon_rank')[na.omit(hits)]$exon_rank)
-    dbAppendTable(
-        con, 'spacer_pam_site',
-        as.data.frame(s.fwd.gr) %>%
-        filter(pam %in% c('AGG', 'TGG', 'CGG', 'GGG')) %>%
-        filter(!grepl('T{4}', spacer)) %>%
-        filter(!grepl('A{10}', spacer)) %>%
-        filter(!grepl('C{10}', spacer)) %>%
-        filter(!grepl('G{10}', spacer))
-    )
-    print('append table')
-    rm(s.fwd, s.fwd.gr)
     ## reverse strand
     s.rev <- matchPattern(
         spacer.pattern[[2]],
         chromosomes[[chrname]],
         fixed=FALSE
     )
-    s.rev.gr <- GRanges(
+    ## spacer GRanges
+    s.gr <- GRanges(
         seqnames=chrname,
-        ranges=IRanges(
-            start=start(s.rev),
-            end=end(s.rev)
+        ranges=c(
+            IRanges(start=start(s.fwd), end=end(s.fwd)),
+            IRanges(start=start(s.rev), end=end(s.rev))
         ),
-        strand='-',
-        spacer=substr(
-            reverseComplement(s.rev),
-            1, spacer.length
+        strand=c(
+            rep('+', length(s.fwd)),
+            rep('-', length(s.rev))
         ),
-        pam=substr(
-            reverseComplement(s.rev),
-            spacer.length + 1,
-            spacer.length + pam.length
+        spacer=c(
+            substr(s.fwd, 1, spacer.length),
+            substr(reverseComplement(s.rev), 1, spacer.length)
+        ),
+        pam=c(
+            substr(s.fwd, spacer.length + 1, spacer.length + pam.length),
+            substr(reverseComplement(s.rev), spacer.length + 1, spacer.length + pam.length)
         ),
         gene_id='',
         exon_rank=-1
     )
+    ## overlapping with genes
     hits <- findOverlaps(
-        s.rev.gr, exons(transcript.anno),
+        s.gr, exons(transcript.anno),
         select='first', ignore.strand=TRUE
     )
-    mcols(s.rev.gr[seq(length(hits))[!is.na(hits)]])$gene_id <- unlist(exons(transcript.anno, columns='gene_id')[na.omit(hits)]$gene_id)
-    mcols(s.rev.gr[seq(length(hits))[!is.na(hits)]])$exon_rank <- unlist(exons(transcript.anno, columns='exon_rank')[na.omit(hits)]$exon_rank)
-
+    s.gr.idx <- seq(length(hits))[!is.na(hits)]
+    gene_id <- exons(transcript.anno, columns='gene_id')$gene_id
+    exon_rank <- exons(transcript.anno, columns='exon_rank')$exon_rank
+    mcols(s.gr[s.gr.idx])$gene_id <- unlist(gene_id[na.omit(hits)])
+    mcols(s.gr[s.gr.idx])$exon_rank <- unlist(exon_rank[na.omit(hits)])
     ## save spacer sites to database table: spacer_pam_site
     dbAppendTable(
         con, 'spacer_pam_site',
-        as.data.frame(s.rev.gr) %>%
+        as.data.frame(s.gr) %>%
         filter(pam %in% c('AGG', 'TGG', 'CGG', 'GGG')) %>%
         filter(!grepl('T{4}', spacer)) %>%
         filter(!grepl('A{10}', spacer)) %>%
         filter(!grepl('C{10}', spacer)) %>%
         filter(!grepl('G{10}', spacer))
     )
-    rm(s.rev, s.rev.gr)
+    rm(s.fwd, s.rev, s.gr)
 }
 
 ## get all unique spacer sequence
@@ -634,7 +609,7 @@ con <- dbConnect(RSQLite::SQLite(), db.file)
 spacer.off.target <- dbFetch(dbSendQuery(
     con, 'SELECT * FROM spacer_mismatch;'
 )) %>%
-    spread(key=mismatch, value=count, fill=0)
+    spread(key='mismatch', value='count', fill=0)
 
 colnames(spacer.off.target) <- c('spacer', 'm0', 'm1', 'm2', 'm3')
 
